@@ -67,6 +67,36 @@ local function safe_transfer(source_inventory, source_stack, dest_inventory)
   end
 end
 
+local function serializeTable(val, name, skipnewlines, depth)
+  skipnewlines = skipnewlines or false
+  depth = depth or 0
+
+  local tmp = string.rep(" ", depth)
+
+  if name then tmp = tmp .. name .. " = " end
+
+  if type(val) == "table" then
+      tmp = tmp .. "{" .. (not skipnewlines and "\n" or "")
+
+      for k, v in pairs(val) do
+          tmp =  tmp .. serializeTable(v, k, skipnewlines, depth + 1) .. "," .. (not skipnewlines and "\n" or "")
+      end
+
+      tmp = tmp .. string.rep(" ", depth) .. "}"
+  elseif type(val) == "number" then
+      tmp = tmp .. tostring(val)
+  elseif type(val) == "string" then
+      tmp = tmp .. string.format("%q", val)
+  elseif type(val) == "boolean" then
+      tmp = tmp .. (val and "true" or "false")
+  else
+      tmp = tmp .. "\"[inserializeable datatype:" .. type(val) .. "]\""
+  end
+
+  return tmp
+end
+
+
 -- check this active proxy for anything to transfer to or from the wagon's inventory
 local function sync_proxy_inventory(proxy, carriage)
   local config = global.wagons[carriage.unit_number]
@@ -144,7 +174,7 @@ local function sync_proxy_inventory(proxy, carriage)
       local main_inv_contents = proxy_main_inv.get_contents()
       -- set the requests according to what's in requests minus what's in the inventory, stopping the request completely if there's any in the proxy's inventory still
       if station_config and station_config.requests and next(station_config.requests) then
-        for i = 1, proxy.request_slot_count do
+        for i = 1, #station_config.requests do
           local request = station_config.requests[i]
           if request and game.item_prototypes[request.name] then
             local count = request.count - (carriage_contents[request.name] or 0)
@@ -484,6 +514,20 @@ local function get_station_select_dropdown(train)
   return items
 end
 
+local function get_station_select_dropdown_current_station(dropdown, train)
+  if not train.station then
+    return 1
+  end
+
+  for index, station in ipairs(dropdown) do
+    if station == train.station.backer_name then
+      return index
+    end
+  end
+
+  return 1
+end
+
 -- redraw the item selections in an open gui, since deleting one from the middle or making a conflicting request can impact the rest of the config
 local function update_gui_item_selections(player, config_flow)
   local entity = player.opened
@@ -551,6 +595,7 @@ end
 -- draw gui elements
 local function on_gui_opened(event)
   if event.entity and event.entity.name == "logistic-cargo-wagon" then
+
     local player = game.players[event.player_index]
     if player.permission_group and player.permission_group.allows_action(defines.input_action.set_logistic_filter_item) then
       if player.gui.left.logistic_cargo_config then
@@ -567,14 +612,36 @@ local function on_gui_opened(event)
         direction = "vertical",
       })
 
+      local stations_dropdown = get_station_select_dropdown(event.entity.train)
       -- station dropdown
       local dropdown = config_flow.add({
         name = "logistic_cargo_config_station_dropdown",
         type = "drop-down",
-        items = get_station_select_dropdown(event.entity.train),
-        selected_index = 1,
+        items = stations_dropdown,
+        selected_index = get_station_select_dropdown_current_station(stations_dropdown, event.entity.train),
         tooltip = {"logistic-cargo-wagon.config-station-tooltip"},
       })
+
+      local station_copy_flow = config_flow.add({
+        name = "logistic_cargo_config_station_copy_flow",
+        type = "flow",
+        direction = "horizontal",
+      })
+
+      local copy_station_button = station_copy_flow.add({
+        name = "logistic_cargo_config_station_copy_button",
+        type = "button",
+        caption = {"logistic-cargo-wagon.config-station-copy-label"},
+        tooltip = {"logistic-cargo-wagon.config-station-copy-tooltip"},
+      })
+
+      local copy_dropdown = station_copy_flow.add({
+        name = "logistic_cargo_config_station_copy_dropdown",
+        type = "drop-down",
+        items = stations_dropdown,
+        selected_index = 1,
+        tooltip = {"logistic-cargo-wagon.config-station-copy-dropdown-tooltip"},
+      })     
 
       local split_flow = config_flow.add({
         name = "logistic_cargo_config_split_flow",
@@ -768,6 +835,8 @@ local gui_change_handlers = {
     local player = game.players[event.player_index]
     update_gui_item_selections(player, event.element.parent)
   end,
+  logistic_cargo_config_station_copy_dropdown = function(event)
+  end,
   logistic_cargo_config_request_button_1 = logistic_cargo_config_request_change,
   logistic_cargo_config_request_button_2 = logistic_cargo_config_request_change,
   logistic_cargo_config_request_button_3 = logistic_cargo_config_request_change,
@@ -844,6 +913,50 @@ local function on_gui_click(event)
           global.wagons[carriage.unit_number] = new_dest_settings
         end
       end
+    else
+      if player.gui.left.logistic_cargo_config then
+        player.gui.left.logistic_cargo_config.destroy()
+      end
+    end
+  end
+
+  if event.element.name == "logistic_cargo_config_station_copy_button" then
+    local player = game.players[event.player_index]
+    local entity = player.opened
+    if entity and entity.valid then
+      local config = global.wagons[entity.unit_number]
+      local config_flow = player.gui.left.logistic_cargo_config.logistic_cargo_config_flow
+
+      local dropdown_to = config_flow.logistic_cargo_config_station_dropdown
+      local station_to = dropdown_to.items[dropdown_to.selected_index]
+
+      -- logistic_cargo_config_station_copy_flow
+
+      local dropdown_from = config_flow.logistic_cargo_config_station_copy_flow.logistic_cargo_config_station_copy_dropdown
+      local station_from = dropdown_from.items[dropdown_from.selected_index]
+
+
+      if not config.stations[station_to] then
+        config.stations[station_to] = {}
+      end
+
+      if not config.stations[station_to].requests then
+        config.stations[station_to].requests = {}
+      end
+      
+      if not config.stations[station_to].provides then
+        config.stations[station_to].provides = {}
+      end
+
+      if config.stations[station_from] and config.stations[station_from].requests then
+        config.stations[station_to].requests = config.stations[station_from].requests
+      end
+
+      if config.stations[station_from] and config.stations[station_from].provides then
+        config.stations[station_to].provides = config.stations[station_from].provides
+      end
+      
+      update_gui_item_selections(player, config_flow)
     else
       if player.gui.left.logistic_cargo_config then
         player.gui.left.logistic_cargo_config.destroy()
