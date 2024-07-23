@@ -3,6 +3,21 @@ require('util')
 -- add option for placeholder fish, removing proxies on leave to prevent chasing robots
 -- trash everything ui button - provide *
 
+local function debugPrint(type, msg, data)
+  -- game.print("Debug selector: " .. settings.global["logistic-cargo-wagon-debug-selector"].value)
+  -- game.print("Type: " .. type)
+  -- game.print("Debugging: " .. tostring(settings.global["logistic-cargo-wagon-debugging"].value))
+  if settings.global["logistic-cargo-wagon-debugging"].value == true then
+    if settings.global["logistic-cargo-wagon-debug-selector"].value == type then
+      game.print(msg)
+      if data then
+        game.print(serpent.line(data))
+      end
+    end
+  end
+
+end
+
 -- make sure there's a proxy player in the wagon
 local function ensure_proxy(entity)
   if not global.wagons[entity.unit_number] then
@@ -100,6 +115,7 @@ end
 -- check this active proxy for anything to transfer to or from the wagon's inventory
 local function sync_proxy_inventory(proxy, carriage)
   local config = global.wagons[carriage.unit_number]
+  debugPrint('sync-info-1', 'calling sync_proxy_inventory')
   if carriage.train.station and carriage.train.station.backer_name then
     if proxy and proxy.valid and proxy.unit_number == carriage.get_driver().unit_number then
       -- we're parked at a station, the right driver is in the carriage, we're good to proceed
@@ -158,6 +174,7 @@ local function sync_proxy_inventory(proxy, carriage)
         config.placeholders[placeholder_item] = nil
       end
 
+      debugPrint('sync-info-2', 'proxy_main_inv.is_empty() ' .. tostring(proxy_main_inv.is_empty()))
       -- scan the main inventory for anything to transfer to the train
       if not proxy_main_inv.is_empty() then
         for i = 1, #proxy_main_inv do
@@ -172,8 +189,15 @@ local function sync_proxy_inventory(proxy, carriage)
       -- get the inventory to subtract counts from requests
       local carriage_contents = carriage_cargo_inv.get_contents()
       local main_inv_contents = proxy_main_inv.get_contents()
+      debugPrint('sync-info-3', 'carriage and main_inv contents', { carriage_contents = carriage_contents, main_inv_contents = main_inv_contents })
+      if not global.ltn_deliveries then
+        debugPrint('sync-info-2', 'no ltn_deliveries')
+      else
+        debugPrint('sync-info-3', 'ltn_deliveries', { ltn_deliveries = global.ltn_deliveries })
+      end
       -- set the requests according to what's in requests minus what's in the inventory, stopping the request completely if there's any in the proxy's inventory still
       if station_config and station_config.requests and next(station_config.requests) then
+        debugPrint('sync-info-2', 'station_config.requests ', station_config.requests)
         for i = 1, #station_config.requests do
           local request = station_config.requests[i]
           if request and game.item_prototypes[request.name] then
@@ -187,17 +211,24 @@ local function sync_proxy_inventory(proxy, carriage)
             proxy.clear_request_slot(i)
           end
         end
-      elseif global.ltn_deliveries and global.ltn_deliveries[carriage.train.id] then
+      elseif global.ltn_deliveries and global.ltn_deliveries[carriage.train.id] then -- LTN
+        debugPrint('sync-info-2', 'ltn_deliveries', { ltn_delivery = global.ltn_deliveries[carriage.train.id], train_id = carriage.train.id } )
         -- check if this is the pickup station - if so, set appropriate requests
         if carriage.train.station.backer_name == global.ltn_deliveries[carriage.train.id].from then
-          -- determine how to handle the remainder after dividing the request among wagons
-          local wagon_count = 0
+          local logistics_wagon_count = 0
           local wagon_position
+          local last_wagon_slot_count
+          local wagon_slot_offset = 0
           for _, check_wagon in ipairs(carriage.train.cargo_wagons) do
+          
             if check_wagon.name == "logistic-cargo-wagon" then
-              wagon_count = wagon_count + 1
+              if last_wagon_slot_count ~= nil and not wagon_position then
+                wagon_slot_offset = wagon_slot_offset + last_wagon_slot_count
+              end
+              logistics_wagon_count = logistics_wagon_count + 1
+              last_wagon_slot_count = #(check_wagon.get_inventory(defines.inventory.cargo_wagon))
               if check_wagon == carriage then
-                wagon_position = wagon_count
+                wagon_position = logistics_wagon_count
               end
             end
           end
@@ -206,24 +237,62 @@ local function sync_proxy_inventory(proxy, carriage)
             local shipment = global.ltn_deliveries[carriage.train.id].shipment
             local item_key, count
             local done = false
-            for i = 1, proxy.request_slot_count do
+            local wagon_slot_count = #carriage_cargo_inv
+            local remaining_implied_slots = wagon_slot_offset
+            local remaining_wagon_slots = wagon_slot_count
+            -- Functionality was changed around request_slot_count, it doesn't default to a
+            -- non-zero number now. It only makes sense to use as many request slots as there are
+            -- total slots in the wagon, so use the inventory size of the wagon.
+            -- game.print(serpent.block({
+            --   wagon_slot_count = wagon_slot_count,
+            --   request_slot_count = proxy.request_slot_count,
+            --   remaining_implied_slots = remaining_implied_slots,
+            --   remaining_wagon_slots = remaining_wagon_slots,
+            
+            -- }))
+            for i = 1, wagon_slot_count do
               if not done then
                 item_key, count = next(shipment, item_key)
+                -- game.print(serpent.block({ item_key = item_key, count = count }))
                 -- adjust count relative to number of wagons
                 if count then
-                  local base = math.floor(count / wagon_count)
-                  local remainder = count - (base * wagon_count)
-                  if remainder >= wagon_position then
-                    count = base + 1
-                  else
-                    count = base
-                  end
-
                   if item_key then
                     local item_name = string.gsub(item_key, "^item,", "")
-                    count = count - (carriage_contents[item_name] or 0)
-                    if count > 0 and game.item_prototypes[item_name] and carriage_cargo_inv.can_insert({ name = item_name, count = 1 }) and not main_inv_contents[item_name] then
-                      proxy.set_request_slot({ name = item_name, count = count }, i)
+                    local item_stack_size = game.item_prototypes[item_name].stack_size
+                    local item_slot_usage_count = math.ceil(count / item_stack_size)
+                    local removable_slots = math.min(remaining_implied_slots, item_slot_usage_count)
+                    remaining_implied_slots = remaining_implied_slots - removable_slots
+                    -- game.print(serpent.block({ item_key = item_key, count = count }))
+                    -- game.print(serpent.line({ count = count, carriage_contents = carriage_contents[item_name], item_stack_size_removable_slots = item_stack_size * removable_slots }))
+                    count = count - (carriage_contents[item_name] or 0) - (item_stack_size * removable_slots) - (main_inv_contents[item_name] or 0)
+                    -- if count > 0 and game.item_prototypes[item_name] and carriage_cargo_inv.can_insert({ name = item_name, count = 1 }) and not main_inv_contents[item_name] then
+                    if count > 0 and game.item_prototypes[item_name] and carriage_cargo_inv.can_insert({ name = item_name, count = 1 }) then
+                      local slots_needed = math.min(remaining_wagon_slots, item_slot_usage_count - removable_slots)
+                      local max_wagon_count = slots_needed * item_stack_size
+                      remaining_wagon_slots = remaining_wagon_slots - slots_needed
+                      -- game.print(serpent.block({
+                      --   name = item_name,
+                      --   slots_needed = slots_needed,
+                      --   count = count,
+                      --   remaining_wagon_slots = remaining_wagon_slots,
+                      --   max_wagon_count = max_wagon_count,
+                      --   item_slot_usage_count = item_slot_usage_count,
+                      -- }))
+                      -- game.print(serpent.block({
+                      --   name = item_name,
+                      --   slots_needed = slots_needed,
+                      --   count = count,
+                      --   remaining_wagon_slots = remaining_wagon_slots,
+                      --   remaining_implied_slots = remaining_implied_slots,
+                      --   item_slot_usage_count = item_slot_usage_count,
+                      --   item_stack_size = item_stack_size }))
+                      local set_count = math.min(count, max_wagon_count)
+                      debugPrint('sync-info-3', 'set wagon request', { item_name = item_name, set_count = set_count })
+                      if set_count == 0 then
+                        proxy.clear_request_slot(i)
+                      else
+                        proxy.set_request_slot({ name = item_name, count = set_count }, i)
+                      end
                     else
                       proxy.clear_request_slot(i)
                     end
