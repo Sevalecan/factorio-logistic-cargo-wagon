@@ -1,9 +1,9 @@
 {
-    "name": "logistic-cargo-wagon",
-    "version": "2.0.0",
-    "title": "Logistic Cargo Wagon",
-    "author": "Egor Kovetskiy (original work by Shane Madden)",
-    "homepage": "https://github.com/kovetskiy/factorio-logistic-cargo-wagon",
+    "name": "logistic-cargo-wagon-fixed",
+    "version": "2.0.1",
+    "title": "Logistic Cargo Wagon FIXED",
+    "author": "Sevalecan (original work by Shane Madden and Egor Kovetskiy)",
+    "homepage": "https://github.com/Sevalecan/factorio-logistic-cargo-wagon",
     "factorio_version": "1.1",
     "dependencies": [
         "base >= 1.1",
